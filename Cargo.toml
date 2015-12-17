@@ -1,0 +1,7 @@
+[package]
+name = "msgpack-rpc"
+version = "0.1.0"
+authors = ["Andy Russell <arussell123@gmail.com>"]
+
+[dependencies]
+rmp = "^0.7"
