@@ -1,5 +1,6 @@
 extern crate eventual;
 extern crate rmp as msgpack;
+extern crate rmp_serde;
 extern crate serde;
 
 use std::io;
@@ -15,6 +16,8 @@ use msgpack::value::{Value, Integer};
 use msgpack::decode::value::read_value;
 use msgpack::encode::value::write_value;
 
+use rmp_serde::encode::Serializer;
+use rmp_serde::decode::Deserializer;
 use serde::{Deserialize, Serialize};
 
 pub struct RpcError;
@@ -25,19 +28,30 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn call(&mut self, method: &str, params: Vec<Value>) -> Result<Value, Value> {
-        let request = Message::Request {
-            id: self.id_counter.fetch_add(1, Ordering::Relaxed) as u32,
-            method: method.to_owned(),
-            params: params.to_owned(),
+    pub fn call<P>(&mut self, method: &str, params: Vec<Box<P>>) -> Result<Value, Value> where P: Serialize {
+        let request = (0, 0, method, params);
+        request.serialize(&mut Serializer::new(&mut self.transport)).ok().unwrap();
+
+        let value = read_value(&mut self.transport).unwrap();
+
+        let array = match value {
+            Value::Array(array) => array,
+            _ => panic!(),
         };
 
-        self.transport.write(&request.pack()).unwrap();
-        let response = Message::unpack(&self.transport).unwrap();
+        let msg_type = match *array.get(0).unwrap() {
+            Value::Integer(Integer::U64(msg_type)) => msg_type,
+            _ => panic!(),
+        };
 
-        match response {
-            Message::Response { ref result, .. } => result.to_owned(),
-            _ => unimplemented!(),
+        assert_eq!(msg_type, 1);
+
+        let err = array.get(2).unwrap().to_owned();
+        let rpc_result = array.get(3).unwrap().to_owned();
+
+        match err {
+            Value::Nil => Ok(rpc_result),
+            _ => Err(err),
         }
     }
 
@@ -124,8 +138,6 @@ impl Message {
 
                 let err = array.get(2).unwrap().to_owned();
                 let rpc_result = array.get(3).unwrap().to_owned();
-
-                println!("{} {}", err, rpc_result);
 
                 let result = match err {
                     Value::Nil => Ok(rpc_result),
