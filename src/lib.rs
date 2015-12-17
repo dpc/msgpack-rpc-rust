@@ -1,11 +1,52 @@
+extern crate eventual;
 extern crate rmp as msgpack;
+extern crate serde;
 
 use std::io;
-use std::io::Read;
+use std::io::Cursor;
+use std::io::prelude::*;
+use std::net::TcpStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use eventual::Future;
 
 use msgpack::value::{Value, Integer};
 use msgpack::decode::value::read_value;
 use msgpack::encode::value::write_value;
+
+use serde::{Deserialize, Serialize};
+
+pub struct RpcError;
+
+pub struct Client {
+    pub transport: TcpStream,
+    pub id_counter: Arc<AtomicUsize>,
+}
+
+impl Client {
+    pub fn call(&mut self, method: &str, params: Vec<Value>) -> Result<Value, Value> {
+        let request = Message::Request {
+            id: self.id_counter.fetch_add(1, Ordering::Relaxed) as u32,
+            method: method.to_owned(),
+            params: params.to_owned(),
+        };
+
+        self.transport.write(&request.pack()).unwrap();
+        let response = Message::unpack(&self.transport).unwrap();
+
+        match response {
+            Message::Response { ref result, .. } => result.to_owned(),
+            _ => unimplemented!(),
+        }
+    }
+
+    fn async_call(method: &str, params: Vec<Value>) -> Future<Value, RpcError> {
+        let (tx, future) = Future::<Value, RpcError>::pair();
+
+        future
+    }
+}
 
 #[derive(PartialEq, Clone, Debug)]
 pub enum Message {
@@ -83,6 +124,8 @@ impl Message {
 
                 let err = array.get(2).unwrap().to_owned();
                 let rpc_result = array.get(3).unwrap().to_owned();
+
+                println!("{} {}", err, rpc_result);
 
                 let result = match err {
                     Value::Nil => Ok(rpc_result),

@@ -5,3 +5,7 @@ authors = ["Andy Russell <arussell123@gmail.com>"]
 
 [dependencies]
 rmp = "^0.7"
+serde = "*"
+
+[dependencies.eventual]
+git = "https://github.com/carllerche/eventual"
