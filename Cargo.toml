@@ -4,8 +4,13 @@ version = "0.1.0"
 authors = ["Andy Russell <arussell123@gmail.com>"]
 
 [dependencies]
+mio = "0.5"
 rmp = "^0.7"
+rmp-serde = "0.8.2"
 serde = "*"
 
 [dependencies.eventual]
 git = "https://github.com/carllerche/eventual"
+
+[dependencies.mioco]
+git = "https://github.com/dpc/mioco"
