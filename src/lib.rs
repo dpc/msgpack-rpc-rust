@@ -4,9 +4,8 @@ extern crate rmp_serde;
 extern crate serde;
 
 use std::io;
-use std::io::Cursor;
 use std::io::prelude::*;
-use std::sync::{Arc, RwLock};
+use std::sync::{mpsc, Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashMap;
 
@@ -20,108 +19,60 @@ use mioco::mio::*;
 
 type MessageId = i32;
 
-pub struct ClientHandler(pub mioco::mio::tcp::TcpStream);
-
-const SERVER: mioco::mio::Token = mioco::mio::Token(0);
-
-impl mioco::mio::Handler for ClientHandler {
-    type Message = Message;
-    type Timeout = ();
-
-    fn ready(&mut self, event_loop: &mut mioco::mio::EventLoop<Self>, token: mioco::mio::Token, _: mioco::mio::EventSet) {
-        match token {
-            SERVER => {
-                let ClientHandler(ref mut server) = *self;
-
-                let mut buf = vec![];
-
-                server.read(&mut buf).unwrap();
-                println!("{:?}", buf);
-            }
-            _ => panic!("unexpected token"),
-        }
-    }
-}
-
 pub struct Client {
-    scheduler: mioco::MailboxOuterEnd<Message>,
-    request_map: Arc<RwLock<HashMap<MessageId, mioco::MailboxOuterEnd<Result<Value, Value>>>>>,
+    sender: mpsc::Sender<Message>,
+    request_map: Arc<Mutex<HashMap<MessageId, mpsc::Sender<Result<Value, Value>>>>>,
     id_generator: AtomicUsize,
 }
 
 impl Client {
     pub fn new(transport: mioco::mio::tcp::TcpStream) -> Client {
         use std::io::prelude::*;
-        let (sender, receiver) = mioco::mailbox::<Message>();
+        let (sender, receiver) = mpsc::channel::<Message>();
 
-        let request_map = Arc::new(RwLock::new(HashMap::new()));
+        let request_map = Arc::new(Mutex::new(HashMap::new()));
 
         let local_request_map = request_map.clone();
         thread::spawn(move || {
             mioco::start(move || {
-                let receiver = mioco::wrap(receiver);
-                loop {
-                    let message = receiver.read();
+                for request in receiver.iter() {
+                    let request = match request {
+                        Message::Request(request) => request,
+                        _ => unimplemented!(),
+                    };
+
                     let transport = try!(transport.try_clone());
                     let request_map = local_request_map.clone();
                     mioco::spawn(move || {
-                        let mut transport = mioco::wrap(transport);
-                        try!(transport.write_all(&message.pack()));
+                        let mut transport = mioco::wrap(try!(transport.try_clone()));
 
-                        let mut buf = vec![];
-                        try!(transport.read(&mut buf));
-                        let message = try!(Message::unpack(Cursor::new(buf)));
+                        try!(transport.write_all(&Message::Request(request).pack()));
+                        let message = try!(Message::unpack(transport));
 
                         match message {
                             Message::Response(Response { id, result }) => {
-                                let request_map = request_map.clone();
-                                let mut request_map_lock = request_map.write().unwrap();
-                                let sender: mioco::MailboxOuterEnd<Result<Value, Value>> = request_map_lock.remove(&id).unwrap();
-                                sender.send(result);
-                            },
-                            _ => unimplemented!()
+                                let sender: mpsc::Sender<Result<Value, Value>> =
+                                    request_map.lock().unwrap().remove(&id).unwrap();
+                                sender.send(result).unwrap();
+                            }
+                            _ => unimplemented!(),
                         }
 
                         Ok(())
                     });
+
                 }
+
+                Ok(())
             });
         });
 
         Client {
-            scheduler: sender,
+            sender: sender,
             request_map: request_map,
             id_generator: AtomicUsize::new(0),
         }
     }
-    // pub fn new<T>(transport: T) -> Client where T: Read + Write + Evented + Send + 'static {
-    //     let mut event_loop = EventLoop::new().unwrap();
-    //     let sender = event_loop.channel();
-
-    //     thread::spawn(move || {
-    //         let _ = event_loop.run(&mut ClientHandler {
-    //             transport: transport,
-    //             requests: Slab::new_starting_at(mio::Token(0), std::u32::MAX as usize),
-    //         });
-    //     });
-
-    //     Client {
-    //         scheduler: sender,
-    //     }
-    // }
-
-    // fn async_call(&mut self, method: &str, params: Vec<Value>) -> Receiver<Result<Value, Value>> {
-    //     let request = Request {
-    //         id: 0,  // FIXME
-    //         method: method.to_owned(),
-    //         params: params.clone(),
-    //     };
-
-    //     let (tx, rx) = mpsc::channel();
-    //     self.scheduler.send(Message::Request(request)).unwrap();
-
-    //     rx
-    // }
 
     fn next_id(&mut self) -> MessageId {
         let ordering = Ordering::Relaxed;
@@ -135,8 +86,11 @@ impl Client {
         id
     }
 
-    pub fn async_call(&mut self, method: &str, params: Vec<Value>) -> mioco::MailboxInnerEnd<Result<Value, Value>> {
-        let (tx, rx) = mioco::mailbox();
+    pub fn async_call(&mut self,
+                      method: &str,
+                      params: Vec<Value>)
+                      -> mpsc::Receiver<Result<Value, Value>> {
+        let (tx, rx) = mpsc::channel();
 
         let request = Request {
             id: self.next_id(),
@@ -144,18 +98,15 @@ impl Client {
             params: params.clone(),
         };
 
-        let request_map = self.request_map.clone();
-        let mut request_map_lock = request_map.write().unwrap();
-        request_map_lock.insert(request.id, tx);
-
-        self.scheduler.send(Message::Request(request));
+        self.request_map.lock().unwrap().insert(request.id, tx);
+        self.sender.send(Message::Request(request)).unwrap();
 
         rx
     }
 
     pub fn call(&mut self, method: &str, params: Vec<Value>) -> Result<Value, Value> {
-        let mailbox = self.async_call(method, params);
-        mioco::wrap(mailbox).read()
+        let receiver = self.async_call(method, params);
+        receiver.recv().unwrap()
     }
 }
 
@@ -250,7 +201,7 @@ impl Message {
                     method: method.to_owned(),
                     params: params.to_owned(),
                 })
-            },
+            }
             1 => {
                 let id = if let Value::Integer(Integer::U64(id)) = *array.get(1).unwrap() {
                     id
@@ -270,7 +221,7 @@ impl Message {
                     id: id as i32,
                     result: result,
                 })
-            },
+            }
             2 => {
                 let method = if let Value::String(ref method) = *array.get(1).unwrap() {
                     method
@@ -303,7 +254,7 @@ impl Message {
                     Value::String(method.to_owned()),
                     Value::Array(params.to_owned()),
                 ])
-            },
+            }
             Message::Response(Response { id, ref result }) => {
                 let (error, result) = match *result {
                     Ok(ref result) => (Value::Nil, result.to_owned()),
@@ -316,14 +267,14 @@ impl Message {
                     error,
                     result,
                 ])
-            },
+            }
             Message::Notification(Notification { ref method, ref params }) => {
                 Value::Array(vec![
                     Value::Integer(Integer::U64(self.msgtype() as u64)),
                     Value::String(method.to_owned()),
                     Value::Array(params.to_owned()),
                 ])
-            },
+            }
         };
         let mut bytes = vec![];
         write_value(&mut bytes, &value).unwrap();
@@ -335,11 +286,11 @@ impl Message {
 fn pack_unpack_request() {
     use std::io::Cursor;
 
-    let request = Message::Request {
+    let request = Message::Request(Request {
         id: 0,
         method: "echo".to_owned(),
         params: vec![Value::String("hello world!".to_owned())],
-    };
+    });
 
     let bytes = request.pack();
     let mut cursor = Cursor::new(&bytes);
@@ -352,10 +303,10 @@ fn pack_unpack_request() {
 fn pack_unpack_response() {
     use std::io::Cursor;
 
-    let response = Message::Response {
+    let response = Message::Response(Response {
         id: 0,
         result: Ok(Value::String("test".to_owned())),
-    };
+    });
 
     let bytes = response.pack();
     let mut cursor = Cursor::new(&bytes);
