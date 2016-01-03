@@ -11,16 +11,7 @@ use msgpack_rpc::Client;
 
 fn main() {
     env_logger::init().unwrap();
-
-    // Setup the server socket
-    let stream = mioco::mio::tcp::TcpStream::connect(&"localhost:9000"
-                                                          .to_socket_addrs()
-                                                          .unwrap()
-                                                          .next()
-                                                          .unwrap())
-                     .unwrap();
-
-    let mut client = Client::new(stream);
+    let mut client = Client::new();
 
     loop {
         let result = client.call("echo", vec![Value::String("Hello, world!".to_owned())]);

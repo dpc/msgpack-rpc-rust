@@ -1,7 +1,12 @@
+#![feature(rustc_private)]
+
 extern crate mioco;
 extern crate rmp as msgpack;
 extern crate rmp_serde;
 extern crate serde;
+
+#[macro_use]
+extern crate log;
 
 use std::io;
 use std::io::prelude::*;
@@ -20,22 +25,37 @@ use mioco::mio::*;
 type MessageId = i32;
 
 pub struct Client {
-    sender: mpsc::Sender<Message>,
+    sender: mioco::MailboxOuterEnd<Message>,
     request_map: Arc<Mutex<HashMap<MessageId, mpsc::Sender<Result<Value, Value>>>>>,
     id_generator: AtomicUsize,
 }
 
 impl Client {
-    pub fn new(transport: mioco::mio::tcp::TcpStream) -> Client {
+    pub fn new() -> Client {
         use std::io::prelude::*;
-        let (sender, receiver) = mpsc::channel::<Message>();
+        let (sender, receiver) = mioco::mailbox();
 
         let request_map = Arc::new(Mutex::new(HashMap::new()));
 
         let local_request_map = request_map.clone();
         thread::spawn(move || {
             mioco::start(move || {
-                for request in receiver.iter() {
+
+                use std::net::ToSocketAddrs;
+                // Setup the server socket
+                let transport = mioco::mio::tcp::TcpStream::connect(&"localhost:9000"
+                                                                 .to_socket_addrs()
+                                                                 .unwrap()
+                                                                 .next()
+                                                                 .unwrap())
+                    .unwrap();
+
+
+                let receiver = mioco::wrap(receiver);
+                loop {
+                    info!("Waiting for request");
+                    let request = receiver.read();
+                    info!("Got request {:?}", request);
                     let request = match request {
                         Message::Request(request) => request,
                         _ => unimplemented!(),
@@ -62,9 +82,7 @@ impl Client {
                     });
 
                 }
-
-                Ok(())
-            });
+            })
         });
 
         Client {
@@ -99,7 +117,7 @@ impl Client {
         };
 
         self.request_map.lock().unwrap().insert(request.id, tx);
-        self.sender.send(Message::Request(request)).unwrap();
+        self.sender.send(Message::Request(request));
 
         rx
     }
